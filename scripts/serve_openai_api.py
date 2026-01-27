@@ -12,9 +12,10 @@ import uvicorn
 
 from threading import Thread
 from queue import Queue
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import apply_lora, load_lora
@@ -32,7 +33,7 @@ def init_model(args):
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
-            max_seq_len=args.max_seq_len,
+            max_position_embeddings=args.max_seq_len,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling
         ))
@@ -46,14 +47,29 @@ def init_model(args):
     return model.eval().to(device), tokenizer
 
 
+class ChatMessage(BaseModel):
+    """单条聊天消息"""
+    role: str = Field(..., description="消息角色: system/user/assistant")
+    content: str = Field(..., description="消息内容")
+    
+    @field_validator('role')
+    @classmethod
+    def validate_role(cls, v):
+        allowed_roles = {'system', 'user', 'assistant', 'tool'}
+        if v not in allowed_roles:
+            raise ValueError(f'角色必须是 {allowed_roles} 之一')
+        return v
+
+
 class ChatRequest(BaseModel):
-    model: str
-    messages: list
-    temperature: float = 0.7
-    top_p: float = 0.92
-    max_tokens: int = 8192
-    stream: bool = False
-    tools: list = []
+    """聊天请求模型"""
+    model: str = Field(default="minimind", description="模型名称")
+    messages: List[ChatMessage] = Field(..., min_length=1, description="对话消息列表")
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="生成温度")
+    top_p: float = Field(default=0.92, ge=0.0, le=1.0, description="nucleus采样阈值")
+    max_tokens: int = Field(default=8192, ge=1, le=32768, description="最大生成长度")
+    stream: bool = Field(default=False, description="是否流式输出")
+    tools: List[dict] = Field(default=[], description="工具列表")
 
 
 class CustomStreamer(TextStreamer):

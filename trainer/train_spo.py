@@ -147,11 +147,14 @@ def spo_train_epoch(epoch, loader, iters, ref_model, reward_model, reward_tokeni
         completion_ids = outputs[:, prompt_inputs["input_ids"].size(1):]  # [B, R]
 
         def get_per_token_logps(mdl, input_ids, n_keep):
-            input_ids = input_ids.detach().clone() if input_ids.is_inference() else input_ids
+            # 确保input_ids不在inference mode下，避免autograd问题
+            if not input_ids.requires_grad:
+                input_ids = input_ids.detach().clone()
             logits = mdl(input_ids, logits_to_keep=n_keep + 1).logits[:, :-1, :]
             per_token_logps = []
             for logits_row, ids_row in zip(logits, input_ids[:, -n_keep:]):
-                ids_row = ids_row.detach().clone() if ids_row.is_inference() else ids_row
+                if not ids_row.requires_grad:
+                    ids_row = ids_row.detach().clone()
                 per_token_logps.append(torch.gather(logits_row.log_softmax(dim=-1), 1, ids_row.unsqueeze(1)).squeeze(1))
             return torch.stack(per_token_logps)
 
@@ -278,7 +281,7 @@ if __name__ == "__main__":
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
-                               max_seq_len=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
+                               max_position_embeddings=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
