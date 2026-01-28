@@ -313,8 +313,17 @@ class MOEFeedForward(nn.Module):
             y = torch.empty_like(x, dtype=x.dtype)
             for i, expert in enumerate(self.experts):
                 expert_out = expert(x[flat_topk_idx == i])
-                if expert_out.shape[0] > 0: y[flat_topk_idx == i] = expert_out.to(y.dtype)
-                else: y[flat_topk_idx == i] = expert_out.to(y.dtype) + 0 * sum(p.sum() for p in expert.parameters())
+                if expert_out.shape[0] > 0:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype)
+                else:
+                    # 避免对专家参数做全量 sum()（开销很大）；取每个参数的一个标量即可建立依赖
+                    # 用于在 MoE 中“未被选中的专家”也能参与图，减少 DDP unused param 风险
+                    dummy = None
+                    for p in expert.parameters():
+                        v = p.view(-1)[0]
+                        dummy = v if dummy is None else (dummy + v)
+                    dummy = (dummy * 0.0) if dummy is not None else 0.0
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype) + dummy
             y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
             y = y.view(*orig_shape)
         else:

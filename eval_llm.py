@@ -2,12 +2,37 @@ import time
 import argparse
 import random
 import warnings
+from contextlib import nullcontext
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings('ignore')
+
+def _resolve_dtype(dtype: str) -> torch.dtype:
+    dtype = (dtype or "auto").lower()
+    if dtype in ("auto",):
+        # 推理默认：CUDA 用 bf16 优先，否则 fp32
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16 if torch.cuda.is_available() else torch.float32
+    if dtype in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if dtype in ("fp16", "float16", "half"):
+        return torch.float16
+    if dtype in ("fp32", "float32"):
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+def _pad_token_id(tokenizer) -> int:
+    if tokenizer.pad_token_id is not None:
+        return tokenizer.pad_token_id
+    if tokenizer.eos_token_id is not None:
+        return tokenizer.eos_token_id
+    return 0
+
 
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
@@ -45,7 +70,17 @@ def main():
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    parser.add_argument('--dtype', default='auto', type=str, help="推理dtype（auto/bf16/fp16/fp32）")
+    parser.add_argument('--seed', default=2026, type=int, help="随机种子（-1表示随机）")
+    parser.add_argument('--seed_each_turn', default=False, action='store_true', help="每轮对话前重置随机种子（更强可复现，但会固定随机流）")
     args = parser.parse_args()
+
+    if args.historys and (args.historys % 2 != 0):
+        raise ValueError("--historys 必须为偶数（Q+A算两轮），或设置为 0")
+    if args.seed != -1:
+        setup_seed(args.seed)
+    else:
+        setup_seed(random.randint(0, 2**31 - 1))
     
     prompts = [
         '你有什么特长？',
@@ -62,10 +97,16 @@ def main():
     model, tokenizer = init_model(args)
     input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    pad_id = _pad_token_id(tokenizer)
+    infer_dtype = _resolve_dtype(args.dtype)
+    autocast_ctx = nullcontext()
+    if "cuda" in str(args.device) and infer_dtype in (torch.float16, torch.bfloat16):
+        autocast_ctx = torch.cuda.amp.autocast(dtype=infer_dtype)
     
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
     for prompt in prompt_iter:
-        setup_seed(2026) # or setup_seed(random.randint(0, 2048))
+        if args.seed_each_turn:
+            setup_seed(args.seed if args.seed != -1 else random.randint(0, 2**31 - 1))
         if input_mode == 0: print(f'💬: {prompt}')
         conversation = conversation[-args.historys:] if args.historys else []
         conversation.append({"role": "user", "content": prompt})
@@ -77,16 +118,18 @@ def main():
 
         print('🤖: ', end='')
         st = time.time()
-        generated_ids = model.generate(
-            inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
-            max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-            top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
-        )
+        with torch.inference_mode(), autocast_ctx:
+            generated_ids = model.generate(
+                inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
+                max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
+                pad_token_id=pad_id, eos_token_id=tokenizer.eos_token_id,
+                top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
+            )
         response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
         conversation.append({"role": "assistant", "content": response})
         gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
-        print(f'\n[Speed]: {gen_tokens / (time.time() - st):.2f} tokens/s\n\n') if args.show_speed else print('\n\n')
+        dt = max(time.time() - st, 1e-6)
+        print(f'\n[Speed]: {gen_tokens / dt:.2f} tokens/s\n\n') if args.show_speed else print('\n\n')
 
 if __name__ == "__main__":
     main()

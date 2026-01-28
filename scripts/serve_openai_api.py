@@ -32,7 +32,8 @@ def init_model(args):
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
-            max_seq_len=args.max_seq_len,
+            # 统一到 config 字段：max_position_embeddings 才会影响 RoPE 预计算长度
+            max_position_embeddings=args.max_seq_len,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling
         ))
@@ -75,19 +76,21 @@ def generate_stream_response(messages, temperature, top_p, max_tokens):
 
         queue = Queue()
         streamer = CustomStreamer(tokenizer, queue)
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0)
 
         def _generate():
-            model.generate(
-                inputs.input_ids,
-                max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                attention_mask=inputs.attention_mask,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                streamer=streamer
-            )
+            with torch.inference_mode():
+                model.generate(
+                    inputs.input_ids,
+                    max_new_tokens=max_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=top_p,
+                    attention_mask=inputs.attention_mask,
+                    pad_token_id=pad_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    streamer=streamer
+                )
 
         Thread(target=_generate).start()
 
@@ -130,13 +133,14 @@ async def chat_completions(request: ChatRequest):
                 add_generation_prompt=True
             )[-request.max_tokens:]
             inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
-            with torch.no_grad():
+            pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0)
+            with torch.inference_mode():
                 generated_ids = model.generate(
                     inputs["input_ids"],
                     max_length=inputs["input_ids"].shape[1] + request.max_tokens,
                     do_sample=True,
                     attention_mask=inputs["attention_mask"],
-                    pad_token_id=tokenizer.pad_token_id,
+                    pad_token_id=pad_id,
                     eos_token_id=tokenizer.eos_token_id,
                     top_p=request.top_p,
                     temperature=request.temperature
