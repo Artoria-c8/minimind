@@ -2,15 +2,22 @@ import time
 import argparse
 import random
 import warnings
+import os
+import sys
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import *
 from trainer.trainer_utils import setup_seed, get_model_params
+
 warnings.filterwarnings('ignore')
 
 def init_model(args):
+    # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
+    
+    # Load Model
     if 'model' in args.load_from:
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
@@ -20,12 +27,25 @@ def init_model(args):
         ))
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+        
+        if not os.path.exists(ckp):
+            print(f"\n❌ Error: Checkpoint file not found: {ckp}")
+            print("请检查 --save_dir, --weight, --hidden_size, --use_moe 参数是否正确。")
+            sys.exit(1)
+            
+        print(f"Loading model from: {ckp}")
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        
         if args.lora_weight != 'None':
             apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+            lora_path = f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth'
+            if not os.path.exists(lora_path):
+                 print(f"\n❌ Error: LoRA checkpoint not found: {lora_path}")
+                 sys.exit(1)
+            load_lora(model, lora_path)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+    
     get_model_params(model, model.config)
     return model.eval().to(args.device), tokenizer
 
@@ -44,7 +64,11 @@ def main():
     parser.add_argument('--top_p', default=0.85, type=float, help="nucleus采样阈值（0-1）")
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    
+    # 自动选择最佳设备
+    default_device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    parser.add_argument('--device', default=default_device, type=str, help="运行设备")
+    
     args = parser.parse_args()
     
     prompts = [
@@ -59,34 +83,79 @@ def main():
     ]
     
     conversation = []
-    model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    try:
+        model, tokenizer = init_model(args)
+    except Exception as e:
+        print(f"❌ Initialization failed: {e}")
+        return
+
+    print(f"\nUsing device: {args.device}")
+    
+    try:
+        mode_input = input('[0] 自动测试\n[1] 手动输入\n请选择模式 (默认0): ').strip()
+        input_mode = int(mode_input) if mode_input.isdigit() else 0
+    except KeyboardInterrupt:
+        print("\nGoodbye!")
+        return
+
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
-    prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
-    for prompt in prompt_iter:
-        setup_seed(2026) # or setup_seed(random.randint(0, 2048))
-        if input_mode == 0: print(f'💬: {prompt}')
-        conversation = conversation[-args.historys:] if args.historys else []
-        conversation.append({"role": "user", "content": prompt})
+    # 手动输入模式下的迭代器
+    def manual_input_iter():
+        while True:
+            try:
+                user_input = input('💬: ').strip()
+                if user_input.lower() in ['exit', 'quit', 'q']:
+                    print("Goodbye!")
+                    break
+                if not user_input:
+                    continue
+                yield user_input
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                print("\nGoodbye!")
+                break
 
-        templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
-        if args.weight == 'reason': templates["enable_thinking"] = True # 仅Reason模型使用
-        inputs = tokenizer.apply_chat_template(**templates) if args.weight != 'pretrain' else (tokenizer.bos_token + prompt)
-        inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
+    prompt_iter = prompts if input_mode == 0 else manual_input_iter()
+    
+    try:
+        for prompt in prompt_iter:
+            setup_seed(2026) # or setup_seed(random.randint(0, 2048))
+            if input_mode == 0: 
+                print(f'💬: {prompt}')
+            
+            conversation = conversation[-args.historys:] if args.historys else []
+            conversation.append({"role": "user", "content": prompt})
 
-        print('🤖: ', end='')
-        st = time.time()
-        generated_ids = model.generate(
-            inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
-            max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-            top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
-        )
-        response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
-        conversation.append({"role": "assistant", "content": response})
-        gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
-        print(f'\n[Speed]: {gen_tokens / (time.time() - st):.2f} tokens/s\n\n') if args.show_speed else print('\n\n')
+            templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
+            if args.weight == 'reason': 
+                templates["enable_thinking"] = True # 仅Reason模型使用
+            
+            inputs = tokenizer.apply_chat_template(**templates) if args.weight != 'pretrain' else (tokenizer.bos_token + prompt)
+            inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
+
+            print('🤖: ', end='', flush=True) # Flush stdout
+            st = time.time()
+            generated_ids = model.generate(
+                inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
+                max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
+                pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
+                top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
+            )
+            response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+            conversation.append({"role": "assistant", "content": response})
+            gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
+            
+            if args.show_speed:
+                print(f'\n[Speed]: {gen_tokens / (time.time() - st):.2f} tokens/s\n\n')
+            else:
+                print('\n\n')
+                
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+    except Exception as e:
+        print(f"\n❌ Error during generation: {e}")
 
 if __name__ == "__main__":
     main()

@@ -2,8 +2,16 @@
 #                                             MiniMind Config
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
 
-from transformers import PretrainedConfig
+import math
+from typing import Optional, Tuple, List, Union
 
+import torch
+import torch.nn.init as init
+import torch.nn.functional as F
+from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
+from transformers.activations import ACT2FN
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 class MiniMindConfig(PretrainedConfig):
     model_type = "minimind"
@@ -54,6 +62,7 @@ class MiniMindConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
         self.inference_rope_scaling = inference_rope_scaling
+        
         # 外推长度 = factor * original_max_position_embeddings = 32768
         self.rope_scaling = {
             "beta_fast": 32,
@@ -63,6 +72,7 @@ class MiniMindConfig(PretrainedConfig):
             "attention_factor": 1.0,
             "type": "yarn"
         } if self.inference_rope_scaling else None
+        
         self.flash_attn = flash_attn
         ####################################################
         # Here are the specific configurations of MOE
@@ -81,17 +91,6 @@ class MiniMindConfig(PretrainedConfig):
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
 #                                             MiniMind Model
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
-
-import math
-import torch
-import torch.nn.init as init
-import torch.nn.functional as F
-from torch import nn
-from transformers.activations import ACT2FN
-from typing import Optional, Tuple, List, Union
-from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
-from transformers.modeling_outputs import CausalLMOutputWithPast
-
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
