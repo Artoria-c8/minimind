@@ -278,13 +278,13 @@ if __name__ == "__main__":
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
     lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
-                               max_seq_len=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
+                               max_position_embeddings=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
-    autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
+    autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=dtype)
     
     # ========== 4. 配wandb ==========
     wandb = None
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     # Value Tracker
     value_tracker = AutoAdaptiveValueTracker(rho_mode='kl', rho_const=0.9, D_half=0.06, clip_lower=0.5, clip_upper=0.96)
     
-    train_ds = RLAIFDataset(args.data_path, tokenizer, max_length=lm_config.max_seq_len)
+    train_ds = RLAIFDataset(args.data_path, tokenizer, max_length=lm_config.max_position_embeddings)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
     

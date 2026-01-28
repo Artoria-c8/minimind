@@ -22,7 +22,7 @@ class MiniMindConfig(PretrainedConfig):
             num_key_value_heads: int = 2,
             vocab_size: int = 6400,
             rms_norm_eps: float = 1e-05,
-            rope_theta: int = 1000000.0,
+            rope_theta: float = 1000000.0,
             inference_rope_scaling: bool = False,
             flash_attn: bool = True,
             ####################################################

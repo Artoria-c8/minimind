@@ -28,20 +28,24 @@ def get_model_params(model, config):
     else: Logger(f'Model Params: {total:.2f}M')
 
 
-def is_main_process():
+def is_main_process() -> bool:
+    """检查是否为主进程（用于分布式训练）"""
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
-def Logger(content):
+def Logger(content: str) -> None:
+    """仅在主进程打印日志"""
     if is_main_process():
         print(content)
 
 
-def get_lr(current_step, total_steps, lr):
-    return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
+def get_lr(current_step: int, total_steps: int, lr: float) -> float:
+    """计算当前学习率（余弦退火调度）"""
+    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
 
 
-def init_distributed_mode():
+def init_distributed_mode() -> int:
+    """初始化分布式训练模式，返回local_rank"""
     if int(os.environ.get("RANK", -1)) == -1:
         return 0  # 非DDP模式
 
@@ -51,7 +55,8 @@ def init_distributed_mode():
     return local_rank
 
 
-def setup_seed(seed: int):
+def setup_seed(seed: int) -> None:
+    """设置随机种子以确保可复现性"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -120,7 +125,7 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', sav
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindForCausalLM(lm_config)
 
-    if from_weight!= 'none':
+    if from_weight != 'none':
         moe_suffix = '_moe' if lm_config.use_moe else ''
         weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
         weights = torch.load(weight_path, map_location=device)
