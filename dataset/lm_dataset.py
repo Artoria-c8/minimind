@@ -4,11 +4,28 @@ import os
 from datasets import load_dataset
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+def _ensure_pad_token(tokenizer):
+    """
+    兼容部分tokenizer未设置pad_token的情况：
+    - 优先使用eos作为pad（推理/训练更常见）
+    - 若eos也不存在，则添加一个[PAD]
+    """
+    if tokenizer.pad_token_id is not None:
+        return
+    if tokenizer.eos_token_id is not None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    else:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
 class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512):
         super().__init__()
         self.tokenizer = tokenizer
+        _ensure_pad_token(self.tokenizer)
         self.max_length = max_length
+        self.pad_id = self.tokenizer.pad_token_id
+        self.bos_id = self.tokenizer.bos_token_id
+        self.eos_id = self.tokenizer.eos_token_id
         self.samples = load_dataset('json', data_files=data_path, split='train')
 
     def __len__(self):
@@ -16,12 +33,17 @@ class PretrainDataset(Dataset):
 
     def __getitem__(self, index):
         sample = self.samples[index]
-        tokens = self.tokenizer(str(sample['text']), add_special_tokens=False, max_length=self.max_length - 2, truncation=True).input_ids
-        tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
-        input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
+        tokens = self.tokenizer(
+            str(sample['text']),
+            add_special_tokens=False,
+            max_length=self.max_length - 2,
+            truncation=True
+        ).input_ids
+        tokens = [self.bos_id] + tokens + [self.eos_id]
+        input_ids = tokens + [self.pad_id] * (self.max_length - len(tokens))
         input_ids = torch.tensor(input_ids, dtype=torch.long)
         labels = input_ids.clone()
-        labels[input_ids == self.tokenizer.pad_token_id] = -100
+        labels[input_ids == self.pad_id] = -100
         return input_ids, labels
 
 
@@ -29,6 +51,7 @@ class SFTDataset(Dataset):
     def __init__(self, jsonl_path, tokenizer, max_length=1024):
         super().__init__()
         self.tokenizer = tokenizer
+        _ensure_pad_token(self.tokenizer)
         self.max_length = max_length
         self.samples = load_dataset('json', data_files=jsonl_path, split='train')
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
@@ -68,7 +91,8 @@ class SFTDataset(Dataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         prompt = self.create_chat_prompt(sample['conversations'])
-        input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+        # 用tokenizer内置的truncation减少Python侧处理开销
+        input_ids = self.tokenizer(prompt, truncation=True, max_length=self.max_length).input_ids
         input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
         labels = self.generate_labels(input_ids)
         # # === 调试打印 ===
@@ -83,6 +107,7 @@ class DPODataset(Dataset):
     def __init__(self, file_path, tokenizer, max_length=4096):
         super().__init__()
         self.tokenizer = tokenizer
+        _ensure_pad_token(self.tokenizer)
         self.max_length = max_length
         self.padding = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids

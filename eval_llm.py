@@ -2,15 +2,26 @@ import time
 import argparse
 import random
 import warnings
+import os
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
+
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
+
 warnings.filterwarnings('ignore')
 
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
+    # 兼容部分tokenizer未设置pad_token的情况（generate/padding会用到）
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
     if 'model' in args.load_from:
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
@@ -20,7 +31,14 @@ def init_model(args):
         ))
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        if not os.path.exists(ckp):
+            raise FileNotFoundError(f'未找到权重文件：{ckp}')
+        # torch>=2.0 支持 weights_only=True，更安全也更省内存；低版本自动回退
+        try:
+            state_dict = torch.load(ckp, map_location=args.device, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(ckp, map_location=args.device)
+        model.load_state_dict(state_dict, strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
             load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
@@ -45,6 +63,8 @@ def main():
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    parser.add_argument('--seed', default=2026, type=int, help="随机种子（用于采样复现）")
+    parser.add_argument('--seed_per_prompt', default=1, type=int, choices=[0, 1], help="是否每轮prompt都重置seed（1=是，0=只在启动时设置一次）")
     args = parser.parse_args()
     
     prompts = [
@@ -65,9 +85,16 @@ def main():
     
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
     for prompt in prompt_iter:
-        setup_seed(2026) # or setup_seed(random.randint(0, 2048))
+        # 默认保持原行为：每轮都重置seed，确保可复现且不受上一轮采样影响
+        if args.seed_per_prompt:
+            setup_seed(args.seed)
+        elif not conversation:
+            setup_seed(args.seed)
         if input_mode == 0: print(f'💬: {prompt}')
-        conversation = conversation[-args.historys:] if args.historys else []
+        history_n = max(int(args.historys), 0)
+        if history_n % 2 == 1:
+            history_n -= 1
+        conversation = conversation[-history_n:] if history_n else []
         conversation.append({"role": "user", "content": prompt})
 
         templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
@@ -77,12 +104,13 @@ def main():
 
         print('🤖: ', end='')
         st = time.time()
-        generated_ids = model.generate(
-            inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
-            max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-            top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
-        )
+        with torch.inference_mode():
+            generated_ids = model.generate(
+                inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
+                max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
+                pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
+                top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
+            )
         response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
         conversation.append({"role": "assistant", "content": response})
         gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
