@@ -1,10 +1,16 @@
-import random
+import os
+import sys
 import re
+import random
 from threading import Thread
+
+# 添加父目录到路径以便导入 trainer_utils
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import torch
 import numpy as np
 import streamlit as st
+from trainer.trainer_utils import setup_seed
 
 st.set_page_config(page_title="MiniMind", initial_sidebar_state="collapsed")
 
@@ -192,16 +198,6 @@ st.markdown(
     '</div>',
     unsafe_allow_html=True
 )
-
-
-def setup_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 def main():

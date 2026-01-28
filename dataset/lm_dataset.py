@@ -4,6 +4,36 @@ import os
 from datasets import load_dataset
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+
+def find_assistant_spans(input_ids, bos_id, eos_id, max_length):
+    """
+    查找输入中所有assistant回复的位置区间。
+    
+    Args:
+        input_ids: token id列表
+        bos_id: assistant回复开始标记的token id列表
+        eos_id: assistant回复结束标记的token id列表
+        max_length: 最大长度限制
+        
+    Returns:
+        list of (start, end) tuples，表示每个assistant回复的区间
+    """
+    spans = []
+    i = 0
+    while i < len(input_ids):
+        if input_ids[i:i + len(bos_id)] == bos_id:
+            start = i + len(bos_id)
+            end = start
+            while end < len(input_ids):
+                if input_ids[end:end + len(eos_id)] == eos_id:
+                    break
+                end += 1
+            spans.append((start, min(end + len(eos_id), max_length)))
+            i = end + len(eos_id) if end < len(input_ids) else len(input_ids)
+        else:
+            i += 1
+    return spans
+
 class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=512):
         super().__init__()
@@ -49,20 +79,10 @@ class SFTDataset(Dataset):
 
     def generate_labels(self, input_ids):
         labels = [-100] * len(input_ids)
-        i = 0
-        while i < len(input_ids):
-            if input_ids[i:i + len(self.bos_id)] == self.bos_id:
-                start = i + len(self.bos_id)
-                end = start
-                while end < len(input_ids):
-                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
-                        break
-                    end += 1
-                for j in range(start, min(end + len(self.eos_id), self.max_length)):
-                    labels[j] = input_ids[j]
-                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
-            else:
-                i += 1
+        spans = find_assistant_spans(input_ids, self.bos_id, self.eos_id, self.max_length)
+        for start, end in spans:
+            for j in range(start, end):
+                labels[j] = input_ids[j]
         return labels
 
     def __getitem__(self, index):
@@ -133,20 +153,10 @@ class DPODataset(Dataset):
 
     def generate_loss_mask(self, input_ids):
         loss_mask = [0] * len(input_ids)
-        i = 0
-        while i < len(input_ids):
-            if input_ids[i:i + len(self.bos_id)] == self.bos_id:
-                start = i + len(self.bos_id)
-                end = start
-                while end < len(input_ids):
-                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
-                        break
-                    end += 1
-                for j in range(start, min(end + len(self.eos_id), self.max_length)):
-                    loss_mask[j] = 1
-                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
-            else:
-                i += 1
+        spans = find_assistant_spans(input_ids, self.bos_id, self.eos_id, self.max_length)
+        for start, end in spans:
+            for j in range(start, end):
+                loss_mask[j] = 1
         return loss_mask
 
 
