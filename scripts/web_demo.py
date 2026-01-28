@@ -1,10 +1,16 @@
+"""
+MiniMind Web Demo
+基于Streamlit的Web界面，用于与MiniMind模型进行对话
+"""
 import random
 import re
 from threading import Thread
+from typing import Optional, List, Dict, Any, Tuple
 
 import torch
 import numpy as np
 import streamlit as st
+from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 st.set_page_config(page_title="MiniMind", initial_sidebar_state="collapsed")
 
@@ -64,11 +70,20 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-system_prompt = []
+system_prompt: List[Dict[str, str]] = []
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def process_assistant_content(content):
+def process_assistant_content(content: str) -> str:
+    """
+    处理助手回复内容，将推理标签转换为可折叠的HTML格式
+    
+    Args:
+        content: 原始回复内容
+        
+    Returns:
+        str: 处理后的HTML内容
+    """
     if model_source == "API" and 'R1' not in api_model_name:
         return content
     if model_source != "API" and 'R1' not in MODEL_PATHS[selected_model][1]:
@@ -96,7 +111,16 @@ def process_assistant_content(content):
 
 
 @st.cache_resource
-def load_model_tokenizer(model_path):
+def load_model_tokenizer(model_path: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+    """
+    加载模型和分词器（带缓存）
+    
+    Args:
+        model_path: 模型路径
+        
+    Returns:
+        Tuple[AutoModelForCausalLM, AutoTokenizer]: 模型和分词器
+    """
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         trust_remote_code=True
@@ -109,12 +133,21 @@ def load_model_tokenizer(model_path):
     return model, tokenizer
 
 
-def clear_chat_messages():
-    del st.session_state.messages
-    del st.session_state.chat_messages
+def clear_chat_messages() -> None:
+    """清空聊天消息"""
+    if "messages" in st.session_state:
+        del st.session_state.messages
+    if "chat_messages" in st.session_state:
+        del st.session_state.chat_messages
 
 
-def init_chat_messages():
+def init_chat_messages() -> List[Dict[str, str]]:
+    """
+    初始化聊天消息（已弃用，保留以兼容旧代码）
+    
+    Returns:
+        List[Dict[str, str]]: 消息列表
+    """
     if "messages" in st.session_state:
         for i, message in enumerate(st.session_state.messages):
             if message["role"] == "assistant":
@@ -137,17 +170,33 @@ def init_chat_messages():
 
     return st.session_state.messages
 
-def regenerate_answer(index):
-    st.session_state.messages.pop()
-    st.session_state.chat_messages.pop()
+def regenerate_answer(index: int) -> None:
+    """
+    重新生成答案
+    
+    Args:
+        index: 消息索引
+    """
+    if len(st.session_state.messages) > 0:
+        st.session_state.messages.pop()
+    if len(st.session_state.chat_messages) > 0:
+        st.session_state.chat_messages.pop()
     st.rerun()
 
 
-def delete_conversation(index):
-    st.session_state.messages.pop(index)
-    st.session_state.messages.pop(index - 1)
-    st.session_state.chat_messages.pop(index)
-    st.session_state.chat_messages.pop(index - 1)
+def delete_conversation(index: int) -> None:
+    """
+    删除对话
+    
+    Args:
+        index: 消息索引
+    """
+    if index > 0 and len(st.session_state.messages) > index:
+        st.session_state.messages.pop(index)
+        st.session_state.messages.pop(index - 1)
+    if index > 0 and len(st.session_state.chat_messages) > index:
+        st.session_state.chat_messages.pop(index)
+        st.session_state.chat_messages.pop(index - 1)
     st.rerun()
 
 
@@ -194,7 +243,13 @@ st.markdown(
 )
 
 
-def setup_seed(seed):
+def setup_seed(seed: int) -> None:
+    """
+    设置随机种子
+    
+    Args:
+        seed: 随机种子值
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -204,7 +259,10 @@ def setup_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def main():
+def main() -> None:
+    """
+    主函数：Web Demo的主入口
+    """
     if model_source == "本地模型":
         model, tokenizer = load_model_tokenizer(model_path)
     else:
@@ -323,6 +381,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
-
     main()
