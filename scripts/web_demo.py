@@ -109,48 +109,6 @@ def load_model_tokenizer(model_path):
     return model, tokenizer
 
 
-def clear_chat_messages():
-    del st.session_state.messages
-    del st.session_state.chat_messages
-
-
-def init_chat_messages():
-    if "messages" in st.session_state:
-        for i, message in enumerate(st.session_state.messages):
-            if message["role"] == "assistant":
-                with st.chat_message("assistant", avatar=image_url):
-                    st.markdown(process_assistant_content(message["content"]), unsafe_allow_html=True)
-                    if st.button("🗑", key=f"delete_{i}"):
-                        st.session_state.messages.pop(i)
-                        st.session_state.messages.pop(i - 1)
-                        st.session_state.chat_messages.pop(i)
-                        st.session_state.chat_messages.pop(i - 1)
-                        st.rerun()
-            else:
-                st.markdown(
-                    f'<div style="display: flex; justify-content: flex-end;"><div style="display: inline-block; margin: 10px 0; padding: 8px 12px 8px 12px;  background-color: #ddd; border-radius: 10px; color: black;">{message["content"]}</div></div>',
-                    unsafe_allow_html=True)
-
-    else:
-        st.session_state.messages = []
-        st.session_state.chat_messages = []
-
-    return st.session_state.messages
-
-def regenerate_answer(index):
-    st.session_state.messages.pop()
-    st.session_state.chat_messages.pop()
-    st.rerun()
-
-
-def delete_conversation(index):
-    st.session_state.messages.pop(index)
-    st.session_state.messages.pop(index - 1)
-    st.session_state.chat_messages.pop(index)
-    st.session_state.chat_messages.pop(index - 1)
-    st.rerun()
-
-
 st.sidebar.title("模型设定调整")
 
 # st.sidebar.text("训练数据偏差，增加上下文记忆时\n多轮对话（较单轮）容易出现能力衰减")
