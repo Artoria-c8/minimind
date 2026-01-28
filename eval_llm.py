@@ -1,40 +1,71 @@
 import time
+import os
 import argparse
 import random
 import warnings
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
+
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
-warnings.filterwarnings('ignore')
+
+warnings.filterwarnings("ignore")
+
+
+def _ensure_pad_token(tokenizer) -> None:
+    # 一些 tokenizer 没有 pad_token，会导致 generate/attention_mask 行为不稳定
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        else:
+            tokenizer.pad_token_id = 0
+
+
+def _resolve_ckpt_path(save_dir: str, weight: str, hidden_size: int, use_moe: int) -> str:
+    moe_suffix = "_moe" if use_moe else ""
+    filename = f"{weight}_{hidden_size}{moe_suffix}.pth"
+    return os.path.join(save_dir, filename)
 
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
+    _ensure_pad_token(tokenizer)
+    if args.load_from == 'model':
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling
         ))
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
-        if args.lora_weight != 'None':
+        ckp = _resolve_ckpt_path(args.save_dir, args.weight, args.hidden_size, args.use_moe)
+        if not os.path.exists(ckp):
+            raise FileNotFoundError(f'未找到模型权重文件：{ckp}')
+        state = torch.load(ckp, map_location='cpu')
+        model.load_state_dict(state, strict=True)
+        if args.lora_weight and str(args.lora_weight).lower() not in {'none', 'null'}:
             apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+            lora_path = os.path.join(args.save_dir, 'lora', f'{args.lora_weight}_{args.hidden_size}.pth')
+            if not os.path.exists(lora_path):
+                raise FileNotFoundError(f'未找到LoRA权重文件：{lora_path}')
+            load_lora(model, lora_path)
     else:
-        model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.load_from,
+            trust_remote_code=True,
+            torch_dtype='auto',
+        )
+    if getattr(model.config, 'pad_token_id', None) is None:
+        model.config.pad_token_id = tokenizer.pad_token_id
     get_model_params(model, model.config)
     return model.eval().to(args.device), tokenizer
 
 def main():
     parser = argparse.ArgumentParser(description="MiniMind模型推理与对话")
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
-    parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
+    parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录（原生torch权重模式下使用）")
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
-    parser.add_argument('--lora_weight', default='None', type=str, help="LoRA权重名称（None表示不使用，可选：lora_identity, lora_medical）")
+    parser.add_argument('--lora_weight', default=None, type=str, help="LoRA权重名称（不传表示不使用，可选：lora_identity, lora_medical）")
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度（512=Small-26M, 640=MoE-145M, 768=Base-104M）")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量（Small/MoE=8, Base=16）")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
@@ -45,6 +76,7 @@ def main():
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    parser.add_argument('--seed', default=2026, type=int, help="随机种子（-1表示每轮随机）")
     args = parser.parse_args()
     
     prompts = [
@@ -60,12 +92,18 @@ def main():
     
     conversation = []
     model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    try:
+        input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    except (ValueError, EOFError):
+        input_mode = 0
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
     for prompt in prompt_iter:
-        setup_seed(2026) # or setup_seed(random.randint(0, 2048))
+        if args.seed == -1:
+            setup_seed(random.randint(0, 2**31 - 1))
+        else:
+            setup_seed(args.seed)
         if input_mode == 0: print(f'💬: {prompt}')
         conversation = conversation[-args.historys:] if args.historys else []
         conversation.append({"role": "user", "content": prompt})
@@ -77,12 +115,13 @@ def main():
 
         print('🤖: ', end='')
         st = time.time()
-        generated_ids = model.generate(
-            inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
-            max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-            top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
-        )
+        with torch.inference_mode():
+            generated_ids = model.generate(
+                inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
+                max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
+                pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
+                top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
+            )
         response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
         conversation.append({"role": "assistant", "content": response})
         gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
