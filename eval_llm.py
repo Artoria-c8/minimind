@@ -1,6 +1,5 @@
 import time
 import argparse
-import random
 import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
