@@ -1,4 +1,7 @@
-model/__pycache__
-out
+__pycache__/
+*.pyc
+*.pyo
+out/
 website/
 docs-minimind/
+.DS_Store
