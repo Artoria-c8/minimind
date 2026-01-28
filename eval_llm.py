@@ -4,13 +4,6 @@ import argparse
 import random
 import warnings
 
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
-
-from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import apply_lora, load_lora
-from trainer.trainer_utils import setup_seed, get_model_params
-
 warnings.filterwarnings("ignore")
 
 
@@ -29,6 +22,13 @@ def _resolve_ckpt_path(save_dir: str, weight: str, hidden_size: int, use_moe: in
     return os.path.join(save_dir, filename)
 
 def init_model(args):
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+
+    from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
+    from model.model_lora import apply_lora, load_lora
+    from trainer.trainer_utils import get_model_params
+
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     _ensure_pad_token(tokenizer)
     if args.load_from == 'model':
@@ -75,9 +75,20 @@ def main():
     parser.add_argument('--top_p', default=0.85, type=float, help="nucleus采样阈值（0-1）")
     parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    parser.add_argument('--device', default='auto', type=str, help="运行设备（auto/cpu/cuda）")
     parser.add_argument('--seed', default=2026, type=int, help="随机种子（-1表示每轮随机）")
     args = parser.parse_args()
+
+    try:
+        import torch
+    except ModuleNotFoundError as e:
+        raise SystemExit("缺少依赖：torch。请先安装 requirements.txt 中的依赖后再运行。") from e
+
+    from transformers import TextStreamer
+    from trainer.trainer_utils import setup_seed
+
+    if args.device == 'auto':
+        args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     prompts = [
         '你有什么特长？',
