@@ -1,15 +1,16 @@
 import time
 import argparse
-import random
 import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
+
 warnings.filterwarnings('ignore')
 
 def init_model(args):
+    """初始化模型和分词器"""
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
         model = MiniMindForCausalLM(MiniMindConfig(
@@ -21,7 +22,7 @@ def init_model(args):
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
-        if args.lora_weight != 'None':
+        if args.lora_weight is not None:
             apply_lora(model)
             load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
     else:
@@ -34,7 +35,7 @@ def main():
     parser.add_argument('--load_from', default='model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
     parser.add_argument('--save_dir', default='out', type=str, help="模型权重目录")
     parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
-    parser.add_argument('--lora_weight', default='None', type=str, help="LoRA权重名称（None表示不使用，可选：lora_identity, lora_medical）")
+    parser.add_argument('--lora_weight', default=None, type=str, help="LoRA权重名称（不指定表示不使用，可选：lora_identity, lora_medical）")
     parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度（512=Small-26M, 640=MoE-145M, 768=Base-104M）")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量（Small/MoE=8, Base=16）")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
@@ -42,7 +43,7 @@ def main():
     parser.add_argument('--max_new_tokens', default=8192, type=int, help="最大生成长度（注意：并非模型实际长文本能力）")
     parser.add_argument('--temperature', default=0.85, type=float, help="生成温度，控制随机性（0-1，越大越随机）")
     parser.add_argument('--top_p', default=0.85, type=float, help="nucleus采样阈值（0-1）")
-    parser.add_argument('--historys', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
+    parser.add_argument('--histories', default=0, type=int, help="携带历史对话轮数（需为偶数，0表示不携带历史）")
     parser.add_argument('--show_speed', default=1, type=int, help="显示decode速度（tokens/s）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     args = parser.parse_args()
@@ -57,36 +58,71 @@ def main():
         '解释什么是机器学习',
         '推荐一些中国的美食'
     ]
-    
+
     conversation = []
     model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+
+    # 输入验证
+    while True:
+        try:
+            input_mode = int(input('[0] 自动测试\n[1] 手动输入\n请选择模式: '))
+            if input_mode in [0, 1]:
+                break
+            print('请输入 0 或 1')
+        except ValueError:
+            print('请输入有效的数字（0 或 1）')
+
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-    
+
+    if input_mode == 1:
+        print('提示：输入空行或按 Ctrl+C 退出对话')
+
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
-    for prompt in prompt_iter:
-        setup_seed(2026) # or setup_seed(random.randint(0, 2048))
-        if input_mode == 0: print(f'💬: {prompt}')
-        conversation = conversation[-args.historys:] if args.historys else []
-        conversation.append({"role": "user", "content": prompt})
 
-        templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
-        if args.weight == 'reason': templates["enable_thinking"] = True # 仅Reason模型使用
-        inputs = tokenizer.apply_chat_template(**templates) if args.weight != 'pretrain' else (tokenizer.bos_token + prompt)
-        inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
+    with torch.inference_mode():
+        for prompt in prompt_iter:
+            if not prompt.strip():
+                break
 
-        print('🤖: ', end='')
-        st = time.time()
-        generated_ids = model.generate(
-            inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
-            max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-            top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
-        )
-        response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
-        conversation.append({"role": "assistant", "content": response})
-        gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
-        print(f'\n[Speed]: {gen_tokens / (time.time() - st):.2f} tokens/s\n\n') if args.show_speed else print('\n\n')
+            setup_seed(2026)
+            if input_mode == 0:
+                print(f'💬: {prompt}')
+
+            conversation = conversation[-args.histories:] if args.histories else []
+            conversation.append({"role": "user", "content": prompt})
+
+            templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
+            if args.weight == 'reason':
+                templates["enable_thinking"] = True  # 仅Reason模型使用
+
+            if args.weight != 'pretrain':
+                inputs = tokenizer.apply_chat_template(**templates)
+            else:
+                inputs = tokenizer.bos_token + prompt
+            inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
+
+            print('🤖: ', end='')
+            st = time.time()
+            generated_ids = model.generate(
+                inputs=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                max_new_tokens=args.max_new_tokens,
+                do_sample=True,
+                streamer=streamer,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                top_p=args.top_p,
+                temperature=args.temperature,
+                repetition_penalty=1.0
+            )
+            response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
+            conversation.append({"role": "assistant", "content": response})
+            gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
+
+            if args.show_speed:
+                print(f'\n[Speed]: {gen_tokens / (time.time() - st):.2f} tokens/s\n')
+            else:
+                print('\n')
 
 if __name__ == "__main__":
     main()
