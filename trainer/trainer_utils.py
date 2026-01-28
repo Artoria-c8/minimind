@@ -106,7 +106,11 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         torch.cuda.empty_cache()
     else:  # 加载模式
         if os.path.exists(resume_path):
-            ckp_data = torch.load(resume_path, map_location='cpu')
+            try:
+                ckp_data = torch.load(resume_path, map_location='cpu')
+            except Exception as e:
+                Logger(f'加载检查点失败: {e}')
+                return None
             saved_ws = ckp_data.get('world_size', 1)
             current_ws = dist.get_world_size() if dist.is_initialized() else 1
             if saved_ws != current_ws:
@@ -123,8 +127,14 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', sav
     if from_weight!= 'none':
         moe_suffix = '_moe' if lm_config.use_moe else ''
         weight_path = f'{save_dir}/{from_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-        weights = torch.load(weight_path, map_location=device)
-        model.load_state_dict(weights, strict=False)
+        if not os.path.exists(weight_path):
+            Logger(f'警告: 权重文件不存在: {weight_path}，将使用随机初始化的模型')
+        else:
+            try:
+                weights = torch.load(weight_path, map_location=device)
+                model.load_state_dict(weights, strict=False)
+            except Exception as e:
+                Logger(f'警告: 加载权重失败: {e}，将使用随机初始化的模型')
 
     get_model_params(model, lm_config)
     Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')

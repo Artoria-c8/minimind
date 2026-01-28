@@ -14,11 +14,16 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 # MoE模型需使用此函数转换
 def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=torch.float16):
+    if not os.path.exists(torch_path):
+        raise FileNotFoundError(f"模型权重文件不存在: {torch_path}")
     MiniMindConfig.register_for_auto_class()
     MiniMindForCausalLM.register_for_auto_class("AutoModelForCausalLM")
     lm_model = MiniMindForCausalLM(lm_config)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    state_dict = torch.load(torch_path, map_location=device)
+    try:
+        state_dict = torch.load(torch_path, map_location=device)
+    except Exception as e:
+        raise RuntimeError(f"加载模型权重失败: {e}")
     lm_model.load_state_dict(state_dict, strict=False)
     lm_model = lm_model.to(dtype)  # 转换模型权重精度
     model_params = sum(p.numel() for p in lm_model.parameters() if p.requires_grad)
@@ -34,8 +39,13 @@ def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=tor
 
 # LlamaForCausalLM结构兼容第三方生态
 def convert_torch2transformers_llama(torch_path, transformers_path, dtype=torch.float16):
+    if not os.path.exists(torch_path):
+        raise FileNotFoundError(f"模型权重文件不存在: {torch_path}")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    state_dict = torch.load(torch_path, map_location=device)
+    try:
+        state_dict = torch.load(torch_path, map_location=device)
+    except Exception as e:
+        raise RuntimeError(f"加载模型权重失败: {e}")
     llama_config = LlamaConfig(
         vocab_size=lm_config.vocab_size,
         hidden_size=lm_config.hidden_size,

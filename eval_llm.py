@@ -2,10 +2,11 @@ import time
 import argparse
 import random
 import warnings
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings('ignore')
 
@@ -20,10 +21,18 @@ def init_model(args):
         ))
         moe_suffix = '_moe' if args.use_moe else ''
         ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        if not os.path.exists(ckp):
+            raise FileNotFoundError(f"模型权重文件不存在: {ckp}")
+        try:
+            model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        except Exception as e:
+            raise RuntimeError(f"加载模型权重失败: {e}")
         if args.lora_weight != 'None':
+            lora_path = f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth'
+            if not os.path.exists(lora_path):
+                raise FileNotFoundError(f"LoRA权重文件不存在: {lora_path}")
             apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+            load_lora(model, lora_path)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     get_model_params(model, model.config)
@@ -60,7 +69,18 @@ def main():
     
     conversation = []
     model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    while True:
+        try:
+            input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+            if input_mode in [0, 1]:
+                break
+            else:
+                print("请输入0或1")
+        except ValueError:
+            print("请输入有效的数字（0或1）")
+        except KeyboardInterrupt:
+            print("\n程序已取消")
+            return
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')

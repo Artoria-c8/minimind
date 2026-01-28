@@ -33,7 +33,13 @@ def apply_lora(model, rank=8):
 
 
 def load_lora(model, path):
-    state_dict = torch.load(path, map_location=model.device)
+    import os
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"LoRA权重文件不存在: {path}")
+    try:
+        state_dict = torch.load(path, map_location=model.device)
+    except Exception as e:
+        raise RuntimeError(f"加载LoRA权重失败: {e}")
     state_dict = {(k[7:] if k.startswith('module.') else k): v for k, v in state_dict.items()}
 
     for name, module in model.named_modules():
