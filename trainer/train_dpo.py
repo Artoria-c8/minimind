@@ -18,7 +18,7 @@ from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import DPODataset
 from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 def logits_to_log_probs(logits, labels):

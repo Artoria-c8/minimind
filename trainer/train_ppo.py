@@ -22,7 +22,7 @@ from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 # 自定义的Critic模型，继承自MiniMindLM

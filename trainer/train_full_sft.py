@@ -17,7 +17,7 @@ from model.model_minimind import MiniMindConfig
 from dataset.lm_dataset import SFTDataset
 from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, init_model, SkipBatchSampler
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):

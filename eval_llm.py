@@ -5,9 +5,9 @@ import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
 
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
@@ -63,7 +63,17 @@ def main():
     input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
-    prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
+    if input_mode == 0:
+        prompt_iter = prompts
+    else:
+        def input_prompt():
+            while True:
+                prompt = input('💬: ')
+                if not prompt:
+                    break
+                yield prompt
+        prompt_iter = input_prompt()
+    
     for prompt in prompt_iter:
         setup_seed(2026) # or setup_seed(random.randint(0, 2048))
         if input_mode == 0: print(f'💬: {prompt}')
@@ -73,7 +83,7 @@ def main():
         templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
         if args.weight == 'reason': templates["enable_thinking"] = True # 仅Reason模型使用
         inputs = tokenizer.apply_chat_template(**templates) if args.weight != 'pretrain' else (tokenizer.bos_token + prompt)
-        inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
+        inputs = tokenizer(inputs, return_tensors="pt", truncation=True, max_length=args.max_new_tokens).to(args.device)
 
         print('🤖: ', end='')
         st = time.time()

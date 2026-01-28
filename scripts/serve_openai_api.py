@@ -19,12 +19,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import apply_lora, load_lora
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
 
 app = FastAPI()
 
 
-def init_model(args):
+def init_model(args, device):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
         moe_suffix = '_moe' if args.use_moe else ''
@@ -71,7 +71,7 @@ class CustomStreamer(TextStreamer):
 def generate_stream_response(messages, temperature, top_p, max_tokens):
     try:
         new_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)[-max_tokens:]
-        inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
+        inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True, max_length=max_tokens).to(device)
 
         queue = Queue()
         streamer = CustomStreamer(tokenizer, queue)
@@ -129,7 +129,7 @@ async def chat_completions(request: ChatRequest):
                 tokenize=False,
                 add_generation_prompt=True
             )[-request.max_tokens:]
-            inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True).to(device)
+            inputs = tokenizer(new_prompt, return_tensors="pt", truncation=True, max_length=request.max_tokens).to(device)
             with torch.no_grad():
                 generated_ids = model.generate(
                     inputs["input_ids"],
@@ -173,5 +173,5 @@ if __name__ == "__main__":
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     args = parser.parse_args()
     device = args.device
-    model, tokenizer = init_model(args)
+    model, tokenizer = init_model(args, device)
     uvicorn.run(app, host="0.0.0.0", port=8998)

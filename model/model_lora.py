@@ -19,9 +19,10 @@ class LoRA(nn.Module):
 
 
 def apply_lora(model, rank=8):
+    device = next(model.parameters()).device
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear) and module.weight.shape[0] == module.weight.shape[1]:
-            lora = LoRA(module.weight.shape[0], module.weight.shape[1], rank=rank).to(model.device)
+            lora = LoRA(module.weight.shape[0], module.weight.shape[1], rank=rank).to(device)
             setattr(module, "lora", lora)
             original_forward = module.forward
 
@@ -33,7 +34,8 @@ def apply_lora(model, rank=8):
 
 
 def load_lora(model, path):
-    state_dict = torch.load(path, map_location=model.device)
+    device = next(model.parameters()).device
+    state_dict = torch.load(path, map_location=device)
     state_dict = {(k[7:] if k.startswith('module.') else k): v for k, v in state_dict.items()}
 
     for name, module in model.named_modules():
