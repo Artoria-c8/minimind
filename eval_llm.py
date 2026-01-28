@@ -3,31 +3,118 @@ import argparse
 import random
 import warnings
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
+from typing import Tuple, List, Dict, Any
+from pathlib import Path
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer, PreTrainedModel, PreTrainedTokenizer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
-warnings.filterwarnings('ignore')
 
-def init_model(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
-        model = MiniMindForCausalLM(MiniMindConfig(
-            hidden_size=args.hidden_size,
-            num_hidden_layers=args.num_hidden_layers,
-            use_moe=bool(args.use_moe),
-            inference_rope_scaling=args.inference_rope_scaling
-        ))
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
-        if args.lora_weight != 'None':
-            apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+# 只过滤特定的警告，而不是全部
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning, module='transformers')
+
+# 常量定义
+WEIGHT_TYPE_PRETRAIN = 'pretrain'
+WEIGHT_TYPE_REASON = 'reason'
+LORA_NONE = 'None'
+MODEL_LOAD_MODE_LOCAL = 'model'
+
+def init_model(args) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
+    """
+    初始化模型和分词器
+    
+    Args:
+        args: 命令行参数
+        
+    Returns:
+        模型和分词器的元组
+        
+    Raises:
+        FileNotFoundError: 当模型文件不存在时
+        RuntimeError: 当模型加载失败时
+    """
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.load_from)
+    except Exception as e:
+        raise RuntimeError(f"加载分词器失败: {e}")
+    
+    # 使用更精确的判断逻辑：检查是否为本地torch权重模式
+    load_from_local = args.load_from == MODEL_LOAD_MODE_LOCAL or Path(args.load_from).stem == MODEL_LOAD_MODE_LOCAL
+    
+    if load_from_local:
+        try:
+            model = MiniMindForCausalLM(MiniMindConfig(
+                hidden_size=args.hidden_size,
+                num_hidden_layers=args.num_hidden_layers,
+                use_moe=bool(args.use_moe),
+                inference_rope_scaling=args.inference_rope_scaling
+            ))
+            moe_suffix = '_moe' if args.use_moe else ''
+            ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+            
+            # 检查权重文件是否存在
+            if not Path(ckp).exists():
+                raise FileNotFoundError(f"模型权重文件不存在: {ckp}")
+            
+            # 使用更安全的加载方式
+            try:
+                # PyTorch 2.0+ 支持 weights_only 参数
+                state_dict = torch.load(ckp, map_location=args.device, weights_only=True)
+            except TypeError:
+                # 旧版本 PyTorch 不支持 weights_only 参数
+                state_dict = torch.load(ckp, map_location=args.device)
+            
+            model.load_state_dict(state_dict, strict=True)
+            
+            # 加载 LoRA 权重（如果指定）
+            if args.lora_weight != LORA_NONE:
+                lora_path = f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth'
+                if not Path(lora_path).exists():
+                    raise FileNotFoundError(f"LoRA权重文件不存在: {lora_path}")
+                apply_lora(model)
+                load_lora(model, lora_path)
+        except Exception as e:
+            raise RuntimeError(f"加载本地模型失败: {e}")
     else:
-        model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+        try:
+            model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+        except Exception as e:
+            raise RuntimeError(f"从HuggingFace加载模型失败: {e}")
+    
     get_model_params(model, model.config)
     return model.eval().to(args.device), tokenizer
+
+def validate_args(args) -> None:
+    """
+    验证命令行参数的有效性
+    
+    Args:
+        args: 命令行参数
+        
+    Raises:
+        ValueError: 当参数值无效时
+    """
+    if not 0 < args.temperature <= 2.0:
+        raise ValueError(f"temperature必须在(0, 2.0]范围内，当前值: {args.temperature}")
+    
+    if not 0 < args.top_p <= 1.0:
+        raise ValueError(f"top_p必须在(0, 1.0]范围内，当前值: {args.top_p}")
+    
+    if args.historys < 0:
+        raise ValueError(f"historys不能为负数，当前值: {args.historys}")
+    
+    if args.historys % 2 != 0:
+        print(f"⚠️  警告: historys建议设置为偶数以保持对话完整性，当前值: {args.historys}")
+    
+    if args.max_new_tokens <= 0:
+        raise ValueError(f"max_new_tokens必须为正数，当前值: {args.max_new_tokens}")
+    
+    if args.hidden_size <= 0:
+        raise ValueError(f"hidden_size必须为正数，当前值: {args.hidden_size}")
+    
+    if args.num_hidden_layers <= 0:
+        raise ValueError(f"num_hidden_layers必须为正数，当前值: {args.num_hidden_layers}")
 
 def main():
     parser = argparse.ArgumentParser(description="MiniMind模型推理与对话")
@@ -47,6 +134,13 @@ def main():
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     args = parser.parse_args()
     
+    # 验证参数
+    try:
+        validate_args(args)
+    except ValueError as e:
+        print(f"❌ 参数验证失败: {e}")
+        return 1
+    
     prompts = [
         '你有什么特长？',
         '为什么天空是蓝色的',
@@ -58,35 +152,113 @@ def main():
         '推荐一些中国的美食'
     ]
     
-    conversation = []
-    model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    conversation: List[Dict[str, str]] = []
+    
+    # 初始化模型
+    try:
+        model, tokenizer = init_model(args)
+    except Exception as e:
+        print(f"❌ 模型初始化失败: {e}")
+        return 1
+    
+    # 获取输入模式（带异常处理）
+    while True:
+        try:
+            input_mode_str = input('[0] 自动测试\n[1] 手动输入\n请选择: ')
+            input_mode = int(input_mode_str)
+            if input_mode not in [0, 1]:
+                print("❌ 请输入0或1")
+                continue
+            break
+        except ValueError:
+            print("❌ 输入无效，请输入数字0或1")
+        except (KeyboardInterrupt, EOFError):
+            print("\n👋 程序已退出")
+            return 0
+    
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
     prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
-    for prompt in prompt_iter:
-        setup_seed(2026) # or setup_seed(random.randint(0, 2048))
-        if input_mode == 0: print(f'💬: {prompt}')
-        conversation = conversation[-args.historys:] if args.historys else []
-        conversation.append({"role": "user", "content": prompt})
+    
+    try:
+        for prompt in prompt_iter:
+            # 跳过空输入
+            if not prompt or not prompt.strip():
+                if input_mode == 1:
+                    print("⚠️  输入为空，请重新输入")
+                continue
+            
+            setup_seed(2026)  # or setup_seed(random.randint(0, 2048))
+            if input_mode == 0: 
+                print(f'💬: {prompt}')
+            
+            # 保留历史对话
+            conversation = conversation[-args.historys:] if args.historys else []
+            conversation.append({"role": "user", "content": prompt})
 
-        templates = {"conversation": conversation, "tokenize": False, "add_generation_prompt": True}
-        if args.weight == 'reason': templates["enable_thinking"] = True # 仅Reason模型使用
-        inputs = tokenizer.apply_chat_template(**templates) if args.weight != 'pretrain' else (tokenizer.bos_token + prompt)
-        inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
+            # 准备输入
+            templates: Dict[str, Any] = {
+                "conversation": conversation, 
+                "tokenize": False, 
+                "add_generation_prompt": True
+            }
+            if args.weight == WEIGHT_TYPE_REASON: 
+                templates["enable_thinking"] = True  # 仅Reason模型使用
+            
+            if args.weight != WEIGHT_TYPE_PRETRAIN:
+                inputs = tokenizer.apply_chat_template(**templates)
+            else:
+                inputs = tokenizer.bos_token + prompt
+                
+            inputs = tokenizer(inputs, return_tensors="pt", truncation=True).to(args.device)
 
-        print('🤖: ', end='')
-        st = time.time()
-        generated_ids = model.generate(
-            inputs=inputs["input_ids"], attention_mask=inputs["attention_mask"],
-            max_new_tokens=args.max_new_tokens, do_sample=True, streamer=streamer,
-            pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-            top_p=args.top_p, temperature=args.temperature, repetition_penalty=1.0
-        )
-        response = tokenizer.decode(generated_ids[0][len(inputs["input_ids"][0]):], skip_special_tokens=True)
-        conversation.append({"role": "assistant", "content": response})
-        gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
-        print(f'\n[Speed]: {gen_tokens / (time.time() - st):.2f} tokens/s\n\n') if args.show_speed else print('\n\n')
+            # 生成回复
+            print('🤖: ', end='')
+            st = time.time()
+            
+            try:
+                generated_ids = model.generate(
+                    inputs=inputs["input_ids"], 
+                    attention_mask=inputs["attention_mask"],
+                    max_new_tokens=args.max_new_tokens, 
+                    do_sample=True, 
+                    streamer=streamer,
+                    pad_token_id=tokenizer.pad_token_id, 
+                    eos_token_id=tokenizer.eos_token_id,
+                    top_p=args.top_p, 
+                    temperature=args.temperature, 
+                    repetition_penalty=1.0
+                )
+            except Exception as e:
+                print(f"\n❌ 生成失败: {e}\n")
+                continue
+            
+            response = tokenizer.decode(
+                generated_ids[0][len(inputs["input_ids"][0]):], 
+                skip_special_tokens=True
+            )
+            conversation.append({"role": "assistant", "content": response})
+            
+            # 计算并显示生成速度
+            gen_tokens = len(generated_ids[0]) - len(inputs["input_ids"][0])
+            elapsed_time = time.time() - st
+            
+            if args.show_speed:
+                # 避免除零错误
+                speed = gen_tokens / elapsed_time if elapsed_time > 0 else 0
+                print(f'\n[Speed]: {speed:.2f} tokens/s\n')
+            else:
+                print('\n')
+                
+    except KeyboardInterrupt:
+        print("\n\n👋 对话已终止")
+        return 0
+    except Exception as e:
+        print(f"\n\n❌ 运行时错误: {e}")
+        return 1
+    
+    return 0
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())
