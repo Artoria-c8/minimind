@@ -1,3 +1,4 @@
+import os
 import time
 import argparse
 import random
@@ -5,27 +6,46 @@ import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from model.model_lora import *
+from model.model_lora import apply_lora, load_lora
 from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings('ignore')
 
 def init_model(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.load_from)
-    if 'model' in args.load_from:
+    tokenizer = AutoTokenizer.from_pretrained(args.load_from, trust_remote_code=True)
+    
+    # 判断是否加载本地MiniMind模型权重
+    if 'model' in args.load_from.lower():
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling
         ))
+        
         moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
+        ckp_file = f'{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+        ckp_path = os.path.join(args.save_dir, ckp_file)
+        
+        if not os.path.exists(ckp_path):
+            print(f"Warning: Checkpoint not found at {ckp_path}")
+        else:
+            print(f"Loading model weights from: {ckp_path}")
+            model.load_state_dict(torch.load(ckp_path, map_location=args.device), strict=True)
+        
         if args.lora_weight != 'None':
             apply_lora(model)
-            load_lora(model, f'./{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+            lora_file = f'{args.lora_weight}_{args.hidden_size}.pth'
+            lora_path = os.path.join(args.save_dir, 'lora', lora_file)
+            
+            if not os.path.exists(lora_path):
+                print(f"Warning: LoRA weights not found at {lora_path}")
+            else:
+                print(f"Loading LoRA weights from: {lora_path}")
+                load_lora(model, lora_path)
     else:
+        # 加载HuggingFace格式模型
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
+        
     get_model_params(model, model.config)
     return model.eval().to(args.device), tokenizer
 
@@ -60,11 +80,26 @@ def main():
     
     conversation = []
     model, tokenizer = init_model(args)
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    try:
+        input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    except (ValueError, EOFError):
+        print("输入错误或结束，默认使用自动测试模式")
+        input_mode = 0
+
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     
-    prompt_iter = prompts if input_mode == 0 else iter(lambda: input('💬: '), '')
+    if input_mode == 0:
+        prompt_iter = prompts
+    else:
+        def safe_input(msg):
+            try:
+                return input(msg)
+            except EOFError:
+                return ''
+        prompt_iter = iter(lambda: safe_input('💬: '), '')
+
     for prompt in prompt_iter:
+        if not prompt.strip(): continue
         setup_seed(2026) # or setup_seed(random.randint(0, 2048))
         if input_mode == 0: print(f'💬: {prompt}')
         conversation = conversation[-args.historys:] if args.historys else []
