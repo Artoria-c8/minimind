@@ -28,7 +28,11 @@ def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=tor
     tokenizer.save_pretrained(transformers_path)
     # 兼容transformers-5.0的写法
     config_path = os.path.join(transformers_path, "tokenizer_config.json")
-    json.dump({**json.load(open(config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}}, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config_data = json.load(f)
+    config_data.update({"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}})
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(config_data, f, indent=2, ensure_ascii=False)
     print(f"模型已保存为 Transformers-MiniMind 格式: {transformers_path}")
 
 
@@ -58,7 +62,11 @@ def convert_torch2transformers_llama(torch_path, transformers_path, dtype=torch.
     tokenizer.save_pretrained(transformers_path)
     # 兼容transformers-5.0的写法
     config_path = os.path.join(transformers_path, "tokenizer_config.json")
-    json.dump({**json.load(open(config_path, 'r', encoding='utf-8')), "tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}}, open(config_path, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config_data = json.load(f)
+    config_data.update({"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {}})
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(config_data, f, indent=2, ensure_ascii=False)
     print(f"模型已保存为 Transformers-Llama 格式: {transformers_path}")
 
 
