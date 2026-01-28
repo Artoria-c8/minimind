@@ -32,14 +32,14 @@ def init_model(args):
         model = MiniMindForCausalLM(MiniMindConfig(
             hidden_size=args.hidden_size,
             num_hidden_layers=args.num_hidden_layers,
-            max_seq_len=args.max_seq_len,
+            max_position_embeddings=args.max_seq_len,
             use_moe=bool(args.use_moe),
             inference_rope_scaling=args.inference_rope_scaling
         ))
-        model.load_state_dict(torch.load(ckp, map_location=device), strict=True)
+        model.load_state_dict(torch.load(ckp, map_location=device, weights_only=True), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
-            load_lora(model, f'../{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')
+            load_lora(model, f'../{args.save_dir}/lora/{args.lora_weight}_{args.hidden_size}.pth')  # load_lora 内部使用 weights_only=True
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
     print(f'MiniMind模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M(illion)')
